@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 def _parse_ts(ts) -> Optional[datetime]:
@@ -190,6 +191,37 @@ def _set_paused(paused: bool) -> int:
     from agent import curator
     curator.set_paused(paused)
     print("curator: paused" if paused else "curator: resumed")
+    return 0
+
+
+_VERIFY_OUTCOME_LABEL = {
+    "verified": "✓ pass", "failed": "✗ FAIL", "skipped": "- no verify:",
+    "errored": "! error", "archived": "✗ arch",
+}
+
+
+def _cmd_verify(args) -> int:
+    """Run just the verify-then-keep gate. Handlers import agent modules lazily."""
+    from agent import curator
+
+    overrides: Dict[str, Any] = {}
+    if getattr(args, "failures", None) is not None:
+        overrides["failures_to_archive"] = args.failures
+    if getattr(args, "timeout", None) is not None:
+        overrides["timeout_seconds"] = args.timeout
+    names = list(getattr(args, "skill", None) or []) or None
+    v = curator.apply_verification_gate(
+        dry_run=bool(getattr(args, "dry_run", False)), only=names, **overrides)
+
+    if getattr(args, "json", False):
+        print(json.dumps(curator._verification_payload(v), indent=2))
+        return 0
+
+    print(f"verify-then-keep gate: {v['summary']}")
+    for r in v.get("results") or []:
+        label = _VERIFY_OUTCOME_LABEL.get(r.outcome, r.outcome)
+        detail = f" — {r.detail}" if r.detail else ""
+        print(f"  {label:12} {r.name:38} `{r.command}`{detail}")
     return 0
 
 
@@ -629,7 +661,24 @@ _SUBCOMMANDS = (
         _arg("--consolidate", dest="consolidate", **_STORE_TRUE,
              help="Force the LLM umbrella-building consolidation pass on for this "
                   "run, overriding the config default (off). Without this flag the "
-                  "run is prune-only unless `curator.consolidate: true` is set.")),
+                  "run is prune-only unless `curator.consolidate: true` is set."),
+        _arg("--verify", dest="verify", **_STORE_TRUE,
+             help="Run the verify-then-keep gate: execute each agent-created skill's "
+                  "`verify:` smoke command and archive repeat failures (default: "
+                  "curator.verify, off). Pinned skills are exempt.")),
+     (
+        "verify", "Run only the verify-then-keep gate (no inactivity prune, no LLM pass)",
+        _cmd_verify,
+        _arg("skill", nargs="*", help="Skill name(s) to verify. Omit to check every "
+                                      "curator-managed skill."),
+        _arg("--dry-run", dest="dry_run", **_STORE_TRUE,
+             help="Report what would fail without archiving anything"),
+        _arg("--failures", type=int, default=None,
+             help="Consecutive failures before archiving (default: "
+                  "curator.verify_failures_to_archive, 3"),
+        _arg("--timeout", type=int, default=None,
+             help="Per-command timeout in seconds (default: curator.verify_timeout_seconds, 20)"),
+        _arg("--json", **_STORE_TRUE, help="Emit the full result as JSON")),
     ("pause", "Pause the curator until resumed", _cmd_pause),
     ("resume", "Resume a paused curator", _cmd_resume),
     ("pin", "Pin a skill so the curator never auto-transitions it", _cmd_pin, _SKILL),

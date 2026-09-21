@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import re
+import shlex
+import subprocess
 import threading
 import time
 from collections import Counter
@@ -32,6 +34,19 @@ DEFAULT_STALE_AFTER_DAYS, DEFAULT_ARCHIVE_AFTER_DAYS = 14, 30
 # The LLM consolidation fork is opt-in; the deterministic inactivity prune
 # (apply_automatic_transitions) always runs when the curator is enabled.
 DEFAULT_CONSOLIDATE = False
+# Verify-then-keep: run each agent-created skill's `verify:` smoke command and archive the ones
+# that fail. OFF by default — the convention (`verify:` frontmatter) is opt-in per skill, and until
+# skills carry the key the gate has nothing to run. A hard per-command wall so one skill with a
+# badly-written smoke test cannot stall the whole curator pass.
+DEFAULT_VERIFY = False
+DEFAULT_VERIFY_TIMEOUT_SECONDS = 20
+# A skill whose verify command fails N consecutive runs is archived. One flake must never archive a
+# skill: a smoke command that touches the network or a busy port fails transiently, and archiving is
+# the curator's maximum action — it must survive one bad day.
+DEFAULT_VERIFY_FAILURES_TO_ARCHIVE = 3
+# Shell metacharacters present => the command needs a shell to run. Keep the list to real operators;
+# a plain path or flag is NOT a metacharacter and must keep the no-shell (faster, safer) route.
+_SHELL_METACHARACTERS = frozenset("|&;<>()$`\\\"'*?[]{}\\n~!#")
 
 
 # --- .curator_state — persistent scheduler + status ---
@@ -125,6 +140,22 @@ def get_archive_after_days() -> int:
 def get_consolidate() -> bool:
     """LLM consolidation pass — OFF by default (prune only, no aux-model fork); ``hermes curator run --consolidate`` overrides per invocation."""
     return bool(_load_config().get("consolidate", DEFAULT_CONSOLIDATE))
+
+
+def get_verify() -> bool:
+    """Verify-then-keep gate — OFF by default. Run each agent-created skill's ``verify:`` smoke command and archive
+    repeat failures. ``hermes curator run --verify`` / ``hermes curator verify`` override per invocation."""
+    return bool(_load_config().get("verify", DEFAULT_VERIFY))
+
+
+def get_verify_timeout_seconds() -> int:
+    """Per-command wall clock for one smoke command; 0 or negative disables the timeout (not recommended)."""
+    return max(0, _config_number("verify_timeout_seconds", DEFAULT_VERIFY_TIMEOUT_SECONDS, int))
+
+
+def get_verify_failures_to_archive() -> int:
+    """Consecutive failed verify runs before the skill is archived; clamped to >= 1 so one flake never archives."""
+    return max(1, _config_number("verify_failures_to_archive", DEFAULT_VERIFY_FAILURES_TO_ARCHIVE, int))
 
 
 # --- Idle / interval check ---
@@ -238,6 +269,175 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
         elif anchor > stale_cutoff and current == _u.STATE_STALE:
             _set(name, _u.STATE_ACTIVE, "reactivated")  # used again after going stale
     return counts
+
+
+# --- Verify-then-keep gate (Voyager-style: a skill stays active only while it verifies) ---
+
+class SkillVerification(NamedTuple):
+    """Outcome of running one skill's ``verify:`` smoke command."""
+    name: str
+    command: str
+    ok: bool
+    outcome: str  # passed | failed | timeout | skipped (no command) | error (could not run)
+    detail: str
+
+    @property
+    def attempted(self) -> bool:
+        """A real exit-code observation — as opposed to skipped/error, which are absence of evidence."""
+        return self.outcome in ("passed", "failed", "timeout")
+
+
+def read_verify_command(skill_md: Path) -> str:
+    """The ``verify:`` frontmatter value of a SKILL.md ("" when absent/blank).
+
+    Read defensively rather than through :func:`agent.skill_utils.parse_frontmatter` so a skill with
+    malformed YAML (tolerated elsewhere — ``parse_frontmatter`` falls back to line splitting) still
+    yields its verify command instead of silently losing the gate.
+    """
+    try:
+        text = skill_md.read_text(encoding="utf-8", errors="replace")[:8000]
+    except OSError:
+        return ""
+    lines = [line.strip() for line in text.split("\n")]
+    if not lines or lines[0] != "---":
+        return ""
+    block = lines[1:]
+    block = block[:block.index("---")] if "---" in block else block
+    for line in block:
+        if not line.startswith("verify:"):
+            continue
+        value = line.split(":", 1)[1].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1].strip()
+        if value.startswith("[") and value.endswith("]"):  # YAML flow sequence: verify: [a, b]
+            value = " ".join(part.strip().strip("'\"") for part in value[1:-1].split(","))
+        return value
+    return ""
+
+
+def run_verify_command(command: str, cwd: Path, timeout_seconds: Optional[int] = None) -> Tuple[bool, str, str]:
+    """Run *command* under *cwd*. Returns ``(ok, outcome, detail)``; ``outcome`` is passed/failed/timeout/error.
+
+    The command comes from the skill's own SKILL.md — authored content, not trusted input — but it is
+    still run with the skill dir as cwd and no shell unless shell operators are actually present, so a
+    smoke command cannot reach outside its own directory by accident.
+    """
+    timeout = get_verify_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    needs_shell = any(ch in command for ch in _SHELL_METACHARACTERS)
+    try:
+        proc = subprocess.run(  # noqa: S602 - authored skill smoke command; shell only when operators demand it
+            command if needs_shell else shlex.split(command),
+            shell=needs_shell, cwd=str(cwd), capture_output=True, text=True,
+            timeout=timeout if timeout > 0 else None,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "timeout", f"exceeded {timeout}s"
+    except (OSError, ValueError) as e:  # missing interpreter, unparsable argv, etc.
+        return False, "error", f"{type(e).__name__}: {e}"
+    if proc.returncode == 0:
+        return True, "passed", ""
+    # Last non-empty stderr line, else stdout: the one line that says why it failed.
+    streams = [s.strip() for s in (proc.stderr or "", proc.stdout or "") if s.strip()]
+    detail = streams[-1].splitlines()[-1][:200] if streams else ""
+    return False, "failed", f"exit {proc.returncode}{f': {detail}' if detail else ''}"
+
+
+def _verify_failures_to_archive() -> int:
+    return get_verify_failures_to_archive()
+
+
+def verify_skill(skill_name: str, skill_dir: Path, timeout_seconds: Optional[int] = None) -> SkillVerification:
+    """Run one skill's ``verify:`` smoke command; outcome ``skipped`` when the skill declares none."""
+    command = read_verify_command(skill_dir / "SKILL.md")
+    if not command:
+        return SkillVerification(skill_name, "", False, "skipped", "no verify: command declared")
+    ok, outcome, detail = run_verify_command(command, skill_dir, timeout_seconds)
+    return SkillVerification(skill_name, command, ok, outcome, detail)
+
+
+def apply_verification_gate(
+    *, timeout_seconds: Optional[int] = None, failures_to_archive: Optional[int] = None,
+    skill_dirs: Optional[Dict[str, Path]] = None, dry_run: bool = False,
+    only: Optional[List[str]] = None,
+    runner: Optional[Callable[[str, Path, Optional[int]], SkillVerification]] = None,
+) -> Dict[str, Any]:
+    """Verify-then-keep: run every curator-managed skill's smoke command and archive repeat failures.
+
+    Semantics deliberately mirror :func:`apply_automatic_transitions` — pinned and cron-referenced
+    skills are exempt, and archiving (never deleting) is the maximum action. Two guards against
+    archiving a healthy skill: a fresh ``_persisted`` record is only seeded (never judged), and a
+    failure must repeat *failures_to_archive* consecutive runs before it counts. A pass resets the
+    counter, so an intermittent smoke command never accumulates to an archive.
+    """
+    from tools import skill_usage as _u
+
+    threshold = _verify_failures_to_archive() if failures_to_archive is None else max(1, int(failures_to_archive))
+    run_one = runner or (lambda name, path, tmo: verify_skill(name, path, tmo))
+    protected = _cron_referenced_skills()
+    dirs = skill_dirs if skill_dirs is not None else _skill_dirs_by_name()
+    counts = {"checked": 0, "verified": 0, "failed": 0, "skipped": 0, "errored": 0, "archived": 0, "cleared": 0, "seeded": 0}
+    results: List[SkillVerification] = []
+
+    for row in _u.curated_report():
+        name = row["name"]
+        if only is not None and name not in only:  # `hermes curator verify <name>`
+            continue
+        if row.get("pinned") or name in protected:
+            continue
+        skill_dir = dirs.get(name)
+        if skill_dir is None:  # no SKILL.md on disk — nothing to run, nothing to judge
+            continue
+        counts["checked"] += 1
+        # First sight: anchor the record like the inactivity pass does; a brand-new skill has not
+        # failed anything yet and must not be judged on a record that does not exist.
+        if not row.get("_persisted", True):
+            if not dry_run:
+                _u.seed_record_if_missing(name)
+            counts["seeded"] += 1
+            continue
+        result = run_one(name, skill_dir, timeout_seconds)
+        results.append(result)
+        if not result.attempted:  # skipped/error: absence of evidence, never a failure
+            counts["skipped" if result.outcome == "skipped" else "errored"] += 1
+            continue
+        if result.ok:
+            counts["verified"] += 1
+            if not dry_run:
+                _u.set_field_supported(name, "verify_failures", 0)
+            continue
+        counts["failed"] += 1
+        if dry_run:
+            continue
+        streak = _int_or_zero(row.get("verify_failures")) + 1
+        _u.set_field_supported(name, "verify_failures", streak)
+        _u.set_field_supported(name, "last_verify_failure", result.detail)
+        if streak >= threshold:
+            if _archive_as_curator(_u, name):
+                counts["archived"] += 1
+
+    return {"counts": counts, "results": results, "threshold": threshold, "dry_run": dry_run,
+            "enabled": True, "summary": _verification_summary(
+                {"enabled": True, "counts": counts, "threshold": threshold, "dry_run": dry_run}).lstrip("; ")}
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _skill_dirs_by_name() -> Dict[str, Path]:
+    """Frontmatter name -> skill dir for every local skill, via the existing gated index walk."""
+    from agent.skill_utils import iter_skill_index_files
+    from tools.skill_usage import _skills_dir, _read_skill_name
+    from agent.skill_utils import is_external_skill_path
+    base = _skills_dir()
+    if not base.exists():
+        return {}
+    return {name: p.parent for p in iter_skill_index_files(base, "SKILL.md")
+            if not is_external_skill_path(p)
+            for name in [_read_skill_name(p, fallback=p.parent.name)]}
 
 
 # --- Review prompt for the forked agent ---
@@ -675,6 +875,7 @@ def _write_file(path: Path, label: str, render: Any) -> None:
 def _write_run_report(
     *, started_at: datetime, elapsed_seconds: float, auto_counts: Dict[str, int], auto_summary: str,
     before_report: List[Dict[str, Any]], before_names: Set[str], after_report: List[Dict[str, Any]], llm_meta: Dict[str, Any],
+    verification: Optional[Dict[str, Any]] = None,
 ) -> Optional[Path]:
     """Write run.json + REPORT.md under logs/curator/{YYYYMMDD-HHMMSS}[-N]/ (N disambiguates a crash-rerun in the same
     second). Returns the report dir, or None if it couldn't be created (reporting is best-effort)."""
@@ -709,6 +910,7 @@ def _write_run_report(
         "pruned_names": [p["name"] for p in diff.pruned], "added": diff.added, "state_transitions": transitions, "cron_rewrites": cron_rewrites,
         "llm_final": llm_meta.get("final", ""), "llm_summary": llm_meta.get("summary", ""),
         "llm_error": llm_meta.get("error"), "tool_calls": llm_meta.get("tool_calls", []),
+        "verification": _verification_payload(verification),
     }
     _write_file(run_dir / "run.json", "run.json", payload)
     _write_file(run_dir / "REPORT.md", "REPORT.md", lambda: _render_report_markdown(payload))
@@ -763,6 +965,45 @@ _REPORT_SECTIONS = (
 )
 
 
+def _verification_payload(verification: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """JSON-safe record of the verify gate: counters plus one row per attempted skill."""
+    if not verification or not verification.get("enabled"):
+        return {"enabled": False}
+    results = verification.get("results") or []
+    return {
+        "enabled": True, "dry_run": bool(verification.get("dry_run")),
+        "threshold": verification.get("threshold"), "counts": verification.get("counts") or {},
+        "error": verification.get("error"),
+        "results": [{"name": r.name, "command": r.command, "ok": r.ok, "outcome": r.outcome, "detail": r.detail}
+                    for r in results if isinstance(r, SkillVerification)],
+    }
+
+
+def _verification_lines(p: Dict[str, Any]) -> List[str]:
+    """REPORT.md section for the verify gate — every failure is named with its command and exit detail."""
+    v = p.get("verification") or {}
+    if not v.get("enabled"):
+        return []
+    counts = v.get("counts") or {}
+    lines = [
+        "## Verify-then-keep gate\\n",
+        f"- enabled: **yes**{'(dry-run)' if v.get('dry_run') else ''}  ·  threshold: **{v.get('threshold')} consecutive failure(s)**",
+        f"- passed: **{counts.get('verified', 0)}**  ·  failed: **{counts.get('failed', 0)}**  ·  "
+        f"no `verify:` command: **{counts.get('skipped', 0)}**  ·  could not run: **{counts.get('errored', 0)}**",
+        f"- archived for repeated verification failure: **{counts.get('archived', 0)}**",
+    ]
+    if v.get("error"):
+        lines.append(f"\\n> ⚠ gate error: `{v['error']}`")
+    failures = [r for r in (v.get("results") or []) if not r.get("ok")]
+    if failures:
+        lines += ["", "Failures:"]
+        for r in failures:
+            lines.append(f"- `{r.get('name')}` — {r.get('outcome')} — `{r.get('command')}`"
+                         + (f" — {r.get('detail')}" if r.get("detail") else ""))
+    lines.append("")
+    return lines
+
+
 def _render_report_markdown(p: Dict[str, Any]) -> str:
     """Render the human-readable REPORT.md."""
     mins, secs = divmod(int(p.get("duration_seconds", 0) or 0), 60)
@@ -782,6 +1023,7 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
         f"- pruned (archived for staleness): **{counts.get('pruned_this_run', 0)}**", f"- new skills this run: **{counts.get('added_this_run', 0)}**",
         f"- state transitions (active ↔ stale ↔ archived): **{counts.get('state_transitions', 0)}**", "",
     ]
+    lines += _verification_lines(p)
     for key, title, intro, render, show, hint in _REPORT_SECTIONS:
         items = p.get(key) or []
         if key == "cron_rewrites":  # lets users audit that the auto-rewrite did the right thing
@@ -837,6 +1079,26 @@ def _render_candidate_list() -> str:
     ])
 
 
+def _verification_summary(verification: Dict[str, Any]) -> str:
+    """The ``; verify: …`` clause appended to the run summary ("" when the gate did not run)."""
+    if not verification.get("enabled"):
+        return ""
+    if verification.get("error"):
+        return f"; verify: error ({verification['error']})"
+    counts = verification.get("counts") or {}
+    if not counts:
+        return "; verify: no skills"
+    parts = [f"{counts[key]} {label}" for key, label in
+             (("verified", "passed"), ("failed", "failed"), ("skipped", "no verify command"), ("errored", "could not run"))
+             if counts.get(key)]
+    if counts.get("archived"):
+        parts.append(f"{counts['archived']} archived (failed {verification.get('threshold', '?')}x)")
+    if not parts:
+        return "; verify: nothing to check"
+    suffix = " (dry-run)" if verification.get("dry_run") else ""
+    return f"; verify: {', '.join(parts)}{suffix}"
+
+
 def _llm_meta(summary: str, error: Optional[str] = None) -> Dict[str, Any]:
     """Structured result of an LLM pass that did not run (skipped or failed)."""
     return {"final": "", "summary": summary, "model": "", "provider": "", "tool_calls": [], "error": error}
@@ -890,15 +1152,18 @@ def _consolidation_pass(prefix: str, auto_summary: str, dry_run: bool, before_na
 
 def run_curator_review(
     on_summary: Optional[Callable[[str], None]] = None, synchronous: bool = False,
-    dry_run: bool = False, consolidate: Optional[bool] = None,
+    dry_run: bool = False, consolidate: Optional[bool] = None, verify: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Execute a single curator review pass: (1) automatic state transitions (no LLM); (2) if *consolidate* and there are
-    candidates, fork an AIAgent on the review prompt; (3) update .curator_state; (4) call *on_summary*.
+    """Execute a single curator review pass: (1) automatic state transitions (no LLM); (2) the verify-then-keep gate if
+    *verify*; (3) if *consolidate* and there are candidates, fork an AIAgent on the review prompt; (4) update
+    .curator_state; (5) call *on_summary*.
     *synchronous* runs the LLM review in the calling thread (default: daemon thread). *consolidate* ``None`` reads
     ``curator.consolidate`` (OFF by default); when off only the deterministic prune runs — no fork, no aux cost.
+    *verify* ``None`` reads ``curator.verify`` (OFF by default).
     *dry_run* SKIPS the stale/archive transitions and instructs the fork to report only; REPORT.md is still written and
     recorded in ``state.last_report_path`` so users can read what WOULD have happened."""
     consolidate = get_consolidate() if consolidate is None else consolidate
+    run_verify = get_verify() if verify is None else verify
     start = datetime.now(timezone.utc)
     if dry_run:  # count candidates without mutating state
         counts = {"checked": len(_safe_curated_report()), "marked_stale": 0, "archived": 0, "reactivated": 0}
@@ -919,9 +1184,19 @@ def run_curator_review(
             with contextlib.suppress(Exception):
                 curator_backup.prune_old_snapshots()
         counts = apply_automatic_transitions(now=start)
+    # Verify-then-keep runs AFTER the inactivity prune and only when enabled: it executes authored
+    # shell commands, so it stays opt-in and never runs on a dry-run with side effects.
+    verification: Dict[str, Any] = {"counts": {}, "results": [], "enabled": run_verify}
+    if run_verify:
+        try:
+            verification = apply_verification_gate(dry_run=dry_run)
+        except Exception as e:  # a crash here must not take down the whole curator pass
+            logger.debug("Curator verification gate failed: %s", e, exc_info=True)
+            verification = {"counts": {}, "results": [], "enabled": True, "error": str(e)}
     auto_summary = ", ".join(
         f"{counts[key]} {label}" for key, label in (("marked_stale", "marked stale"), ("archived", "archived"), ("reactivated", "reactivated")) if counts[key]
     ) or "no changes"
+    auto_summary += _verification_summary(verification)
 
     # Persist before the LLM pass so a crash mid-review still records the run.
     # Dry-run does NOT bump last_run_at/run_count (a preview must not push the
@@ -949,6 +1224,7 @@ def run_curator_review(
             report_path = _write_run_report(
                 started_at=start, elapsed_seconds=elapsed, auto_counts=counts, auto_summary=auto_summary,
                 before_report=before_report, before_names=before_names, after_report=_safe_curated_report(), llm_meta=llm_meta,
+                verification=verification,
             )
             if report_path is not None:
                 state2["last_report_path"] = str(report_path)
@@ -961,7 +1237,8 @@ def run_curator_review(
         _llm_pass()
     else:
         threading.Thread(target=_llm_pass, daemon=True, name="curator-review").start()
-    return {"started_at": start.isoformat(), "auto_transitions": counts, "summary_so_far": auto_summary}
+    return {"started_at": start.isoformat(), "auto_transitions": counts, "summary_so_far": auto_summary,
+            "verification": verification}
 
 
 # --- Provider/model resolution for the review fork ---

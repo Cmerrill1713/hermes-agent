@@ -34,14 +34,17 @@ MUTATING_TOOL_NAMES = frozenset({
 # Pollers: legitimately re-invoked with identical args; the identical-call NOTICE never fires.
 STALL_GUARD_REPEATABLE_TOOLS = frozenset({"process_manage"})
 _STALL_GUARD_REPEATABLE_SUFFIXES = ("_get_result", "_poll")  # generated / MCP poller conventions
-# Nth consecutive identical (tool, args, result) call that fires the notice; 3 tolerates one double-check.
-STALL_GUARD_IDENTICAL_CALL_THRESHOLD = 3
+# Default Nth consecutive identical SUCCESS (tool, args, result) that fires the notice.
+# Overridden by tool_loop_guardrails.warn_after.identical_success (loop-discipline A).
+STALL_GUARD_IDENTICAL_CALL_THRESHOLD = 2
+# Default hard-stop for that SUCCESS streak; overridden by hard_stop_after.identical_success.
+# Kept separate from failure/idempotent_no_progress thresholds.
+STALL_GUARD_IDENTICAL_SUCCESS_HALT_THRESHOLD = 4
 # Repeating multi-call cycles (A,B,A,B,... with identical args AND results) defeat the
 # consecutive streak above — every alternation resets it, so a model replaying the same
 # 2–4 call batch each iteration ran to the budget unflagged (port of can1357/oh-my-pi#10521,
 # which widened their loop guard from single-call turns to whole tool-call batches).
-# Longest cycle period detected; laps reuse the streak thresholds (notice at
-# STALL_GUARD_IDENTICAL_CALL_THRESHOLD laps, halt at no_progress_block_after laps).
+# Longest cycle period detected; laps reuse identical_success warn/halt thresholds.
 _STALL_GUARD_MAX_CYCLE_PERIOD = 4
 # History window: enough for block_after laps of the longest cycle plus slack.
 _STALL_GUARD_CYCLE_HISTORY = 64
@@ -71,9 +74,11 @@ _THRESHOLD_SOURCES: dict[str, tuple[str, str]] = {
     "exact_failure_warn_after": ("warn_after", "exact_failure"),
     "same_tool_failure_warn_after": ("warn_after", "same_tool_failure"),
     "no_progress_warn_after": ("warn_after", "idempotent_no_progress"),
+    "identical_success_warn_after": ("warn_after", "identical_success"),
     "exact_failure_block_after": ("hard_stop_after", "exact_failure"),
     "same_tool_failure_halt_after": ("hard_stop_after", "same_tool_failure"),
     "no_progress_block_after": ("hard_stop_after", "idempotent_no_progress"),
+    "identical_success_halt_after": ("hard_stop_after", "identical_success"),
 }
 
 # Per-turn caps on runaway-prone tools (counters reset in reset_for_turn).
@@ -127,6 +132,8 @@ class ToolCallGuardrailConfig:
     same_tool_failure_halt_after: int = 8
     no_progress_warn_after: int = 2
     no_progress_block_after: int = 5
+    identical_success_warn_after: int = STALL_GUARD_IDENTICAL_CALL_THRESHOLD
+    identical_success_halt_after: int = STALL_GUARD_IDENTICAL_SUCCESS_HALT_THRESHOLD
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
     mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
     loop_caps: LoopCapConfig = field(default_factory=LoopCapConfig)
@@ -282,10 +289,11 @@ _DECISION_MESSAGES: dict[str, str] = {
 }
 
 _IDENTICAL_CALL_NOTICE = (
-    "[hermes note: this is the {ordinal} consecutive identical call to "
+    "[hermes note: this is the {ordinal} consecutive identical SUCCESS call to "
     "{tool_name} with identical arguments returning the same result. "
-    "Do not repeat it — change arguments, use a different tool, or "
-    "proceed with what you have.]"
+    "You already ran this — change approach, use a Level-2 CLI verifier "
+    "(photo pull / ha call / cron verify / memory capacity / config check), "
+    "or proceed with what you have. Do not repeat the same call.]"
 )
 
 _IDENTICAL_CYCLE_NOTICE = (
@@ -448,37 +456,40 @@ class ToolCallGuardrailController:
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
         result_hash = _result_hash(result) if is_plain_str else ""
 
-        if is_plain_str and (signature, result_hash) == (self._identical_streak_sig, self._identical_streak_result_hash):
+        # Identical-SUCCESS streak only (failures use same_tool_failure / exact_failure).
+        success_plain = is_plain_str and not failed
+        if success_plain and (signature, result_hash) == (self._identical_streak_sig, self._identical_streak_result_hash):
             self._identical_streak_count += 1
         else:
-            # New streak; non-string (multimodal) results never form one.
-            self._identical_streak_sig = signature if is_plain_str else None
-            self._identical_streak_result_hash = result_hash
-            self._identical_streak_count = 1 if is_plain_str else 0
-            self._identical_streak_first_call_id = tool_call_id or ""
+            # New streak; failures and non-string (multimodal) results never form one.
+            self._identical_streak_sig = signature if success_plain else None
+            self._identical_streak_result_hash = result_hash if success_plain else ""
+            self._identical_streak_count = 1 if success_plain else 0
+            self._identical_streak_first_call_id = (tool_call_id or "") if success_plain else ""
         count = self._identical_streak_count
+        warn_after = self.config.identical_success_warn_after
+        halt_after = self.config.identical_success_halt_after
 
         notice = None
-        if not is_stall_guard_repeatable(tool_name) and count >= STALL_GUARD_IDENTICAL_CALL_THRESHOLD:
+        if not is_stall_guard_repeatable(tool_name) and count >= warn_after:
             notice = _IDENTICAL_CALL_NOTICE.format(ordinal=_ordinal(count), tool_name=tool_name)
-            # The no-progress BLOCK in before_call only covers idempotent_tools; this streak
-            # is tool-agnostic, so with hard stops on, halt at the same threshold (a model
-            # replaying a successful `terminal` call otherwise runs to the budget).
-            if self.config.hard_stop_enabled and count >= self.config.no_progress_block_after and self._halt_decision is None:
+            # Separate from idempotent_no_progress / failure hard_stops (loop-discipline A).
+            if self.config.hard_stop_enabled and count >= halt_after and self._halt_decision is None:
                 self._decide("halt", "identical_call_streak_halt", tool_name, count, signature)
 
         # Batch-cycle detection (oh-my-pi#10521): a repeating multi-call cycle resets the
         # consecutive streak on every alternation, so check the call history for a period-p lap.
-        if is_plain_str:
+        # Only SUCCESS results enter history for identical-success cycle detection.
+        if success_plain:
             self._call_history.append((signature, result_hash, is_stall_guard_repeatable(tool_name)))
-        else:
+        elif not is_plain_str:
             self._call_history.clear()
-        if notice is None and is_plain_str:
+        if notice is None and success_plain:
             cycle = self._detect_identical_cycle()
             if cycle is not None:
                 period, laps = cycle
                 notice = _IDENTICAL_CYCLE_NOTICE.format(count=laps, period=period, tool_name=tool_name)
-                if self.config.hard_stop_enabled and laps >= self.config.no_progress_block_after and self._halt_decision is None:
+                if self.config.hard_stop_enabled and laps >= halt_after and self._halt_decision is None:
                     self._decide("halt", "identical_cycle_halt", tool_name, laps, signature, period=period)
 
         stub = None
@@ -496,8 +507,9 @@ class ToolCallGuardrailController:
         the cycle keeps the guard armed, matching the single-call exemption semantics.
         """
         history = self._call_history
+        warn_after = self.config.identical_success_warn_after
         for period in range(2, _STALL_GUARD_MAX_CYCLE_PERIOD + 1):
-            if len(history) < period * STALL_GUARD_IDENTICAL_CALL_THRESHOLD:
+            if len(history) < period * warn_after:
                 continue
             laps = 1
             # Count how many consecutive trailing laps equal the final lap.
@@ -512,7 +524,7 @@ class ToolCallGuardrailController:
                 if not lap_equal:
                     break
                 laps += 1
-            if laps >= STALL_GUARD_IDENTICAL_CALL_THRESHOLD:
+            if laps >= warn_after:
                 tail = [history[len(history) - period + i] for i in range(period)]
                 if all(repeatable for _, _, repeatable in tail):
                     continue

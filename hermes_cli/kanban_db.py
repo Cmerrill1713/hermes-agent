@@ -4060,6 +4060,16 @@ def _ctx_header(lines: list[str], task: Task) -> None:
         lines.append("## Body")
         lines.append(_ctx_cap(task.body, _CTX_MAX_BODY_BYTES))
         lines.append("")
+    lines.append("## Mandatory close-out")
+    lines.append(
+        "When your implementation work is done (or you are blocked and cannot "
+        "proceed), you MUST call a terminal kanban tool before ending:\n"
+        "- `kanban_complete(summary=..., artifacts=[...])` — work finished.\n"
+        "- `kanban_block(reason=...)` — blocked, needs human input.\n"
+        "A plain-text reply is NOT a terminal state; the dispatcher treats a "
+        "clean exit without a board tool as a protocol violation."
+    )
+    lines.append("")
 
 
 def _ctx_attachments(lines: list[str], attachments: list[Attachment]) -> None:

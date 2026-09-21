@@ -2326,6 +2326,9 @@ export interface Translations {
     tabLinks: string
     noArtifactsTitle: string
     noArtifactsDesc: string
+    allFailedTitle: string
+    allFailedDesc: string
+    retry: string
     failedLoad: string
     openFailed: string
     itemsImage: string

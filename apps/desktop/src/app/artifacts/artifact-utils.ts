@@ -436,10 +436,52 @@ export function collectArtifactsForSession(session: SessionInfo, messages: Sessi
   return Array.from(found.values())
 }
 
+/**
+ * Hard ceiling on ONE session's transcript load.
+ *
+ * `getAllSessionMessages` resolves only when the whole transcript has arrived
+ * (it throws only on the 32 MB safe-load guard). A single session whose
+ * request stalls — a wedged socket, a backend that accepted the connection and
+ * never answered, a profile backend that never came up — would otherwise leave
+ * the promise pending forever, and indexing is strictly serial, so one stalled
+ * session pinned `artifacts` at `null` and the pane sat on its spinner
+ * indefinitely with nothing to click and no error to read. Enforced here,
+ * beside the serial loop, so every caller is bounded — not just the one that
+ * happened to notice.
+ */
+const PER_SESSION_LOAD_TIMEOUT_MS = 15_000
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms)
+      })
+    ])
+  } finally {
+    if (timer) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+export interface ArtifactLoadOptions {
+  /** Called after each session with everything indexed so far, so a caller can
+   *  paint partial results instead of blocking on the whole page. */
+  onProgress?: (artifacts: readonly ArtifactRecord[]) => void
+  /** Overrides {@link PER_SESSION_LOAD_TIMEOUT_MS}. Tests use a short value. */
+  timeoutMs?: number
+}
+
 export async function loadArtifactsForSessions(
   sessions: SessionInfo[],
-  loadMessages: (session: SessionInfo) => Promise<SessionMessage[]>
+  loadMessages: (session: SessionInfo) => Promise<SessionMessage[]>,
+  options: ArtifactLoadOptions = {}
 ): Promise<ArtifactLoadResult> {
+  const { onProgress, timeoutMs = PER_SESSION_LOAD_TIMEOUT_MS } = options
   const artifacts: ArtifactRecord[] = []
   const failures: ArtifactLoadFailure[] = []
 
@@ -448,11 +490,16 @@ export async function loadArtifactsForSessions(
   // the Desktop renderer and a remote dashboard backend.
   for (const session of sessions) {
     try {
-      const messages = await loadMessages(session)
+      const messages = await withTimeout(loadMessages(session), timeoutMs)
       artifacts.push(...collectArtifactsForSession(session, messages))
     } catch (error) {
       failures.push({ error, session })
     }
+
+    // Report after every session, including failures: a caller painting
+    // partial results must be able to show what succeeded while the rest of
+    // the index is still (or permanently) unavailable.
+    onProgress?.(artifacts)
   }
 
   return { artifacts, failures }

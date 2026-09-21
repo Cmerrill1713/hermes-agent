@@ -2772,6 +2772,10 @@ export const en: Translations = {
     tabLinks: 'Links',
     noArtifactsTitle: 'No artifacts found',
     noArtifactsDesc: 'Generated images and file outputs will appear here as sessions produce them.',
+    allFailedTitle: 'Could not read your sessions',
+    allFailedDesc:
+      'Every recent session failed to load, so artifacts could not be indexed. This is usually a backend that is still starting up.',
+    retry: 'Try again',
     failedLoad: 'Artifacts failed to load',
     openFailed: 'Open failed',
     itemsImage: 'images',

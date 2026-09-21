@@ -442,6 +442,16 @@ def _set_field(skill_name: str, key: str, value: Any) -> bool:
     return bool(_mutate(skill_name, lambda rec: rec.update({key: value}) or True, require_curation_eligible=True))
 
 
+def set_field_supported(skill_name: str, key: str, value: Any) -> bool:
+    """Public single-field write for curator-owned extra fields (``verify_failures``, ``last_verify_failure``).
+
+    Same curation gate as :func:`_set_field` — bundled/hub/external skills are never written — but unlike
+    the lifecycle helpers it does not emit a lifecycle event, because these keys are bookkeeping for the
+    verification gate, not a state change.
+    """
+    return _set_field(skill_name, key, value)
+
+
 def _bump(rec: Dict[str, Any], count_key: str, ts_key: str) -> None:
     rec[count_key] = _non_negative_int(rec.get(count_key)) + 1
     rec[ts_key] = _now_iso()

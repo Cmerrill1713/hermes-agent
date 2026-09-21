@@ -125,6 +125,7 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
   const [filePage, setFilePage] = useState(1)
 
   const [refreshing, setRefreshing] = useState(false)
+  const [loadFailures, setLoadFailures] = useState(0)
   const refreshInFlightRef = useRef(false)
 
   const refreshArtifacts = useCallback(async () => {
@@ -140,7 +141,15 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
 
       const { artifacts: nextArtifacts, failures } = await loadArtifactsForSessions(
         sessions,
-        async session => (await getAllSessionMessages(session.id, session.profile)).messages
+        async session => (await getAllSessionMessages(session.id, session.profile)).messages,
+        {
+          // Paint each session's findings as they land. Results are still
+          // serial (one transcript resident at a time) but the pane is usable
+          // after the first session instead of after all thirty.
+          onProgress: partial => {
+            setArtifacts([...partial].sort((left, right) => right.timestamp - left.timestamp))
+          }
+        }
       )
 
       if (failures.length > 0) {
@@ -167,6 +176,7 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
         })
       }
 
+      setLoadFailures(failures.length)
       setArtifacts(nextArtifacts.sort((left, right) => right.timestamp - left.timestamp))
     } catch (err) {
       notifyError(err, a.failedLoad)
@@ -348,6 +358,26 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
     >
       {!artifacts ? (
         <PageLoader label={a.indexing} />
+      ) : artifacts.length === 0 && loadFailures > 0 ? (
+        // Every session failed: say so, and offer the one action that can
+        // help. An empty grid here reads as "you have no artifacts", which is
+        // a different (and much more confusing) claim than "we could not
+        // look".
+        <div className="grid h-full place-items-center px-6 text-center">
+          <div>
+            <div className="text-sm font-medium">{a.allFailedTitle}</div>
+            <div className="mt-1 text-xs text-muted-foreground">{a.allFailedDesc}</div>
+            <Button
+              className="mt-3"
+              disabled={refreshing}
+              onClick={() => void refreshArtifacts()}
+              size="sm"
+              variant="outline"
+            >
+              {refreshing ? a.refreshing : a.retry}
+            </Button>
+          </div>
+        </div>
       ) : visibleArtifacts.length === 0 ? (
         <div className="grid h-full place-items-center px-6 text-center">
           <div>

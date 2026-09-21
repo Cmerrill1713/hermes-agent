@@ -100,6 +100,9 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"|stream\s+(?:drop|drop\s+mid\s+tool-call).+retry\s+\d"
     r"|stale\s+connections\s+from\s+a\s+previous\s+provider\s+issue"
     rf"|{re.escape(COMPACTION_DONE_STATUS)}"
+    # Memory recall indicators ("🧠 RLM memory plane — recalled 3 memories") — operator
+    # preference 2026-09-17: messaging surfaces get conversation + requested replies only.
+    r"|recalled\s+(?:relevant\s+memory|\d+\s+memor)"
     r")",
     re.IGNORECASE | re.DOTALL)
 

@@ -25,6 +25,8 @@ _EXTENSION_MIME_TYPES = {
     ".bmp": "image/bmp",
     ".webp": "image/webp",
     ".svg": "image/svg+xml",
+    ".heic": "image/heic",
+    ".heif": "image/heic",
 }
 
 # Media types the major vision providers (Anthropic in particular) accept

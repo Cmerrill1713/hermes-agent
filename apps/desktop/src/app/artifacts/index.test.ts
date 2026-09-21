@@ -446,4 +446,63 @@ describe('loadArtifactsForSessions', () => {
     expect(result.failures).toHaveLength(1)
     expect(result.failures[0]?.session.id).toBe('session-2')
   })
+
+  it('reports progress after each session, including failures', async () => {
+    const sessions = [makeSession({ id: 'session-1' }), makeSession({ id: 'session-2' })]
+
+    const snapshots: number[] = []
+
+    await loadArtifactsForSessions(
+      sessions,
+      async session => {
+        if (session.id === 'session-2') {
+          throw new Error('timed out')
+        }
+
+        return [
+          { content: 'https://example.com/one.png', role: 'assistant', timestamp: 2000 },
+          { content: 'https://example.com/two.png', role: 'assistant', timestamp: 2001 }
+        ]
+      },
+      { onProgress: partial => snapshots.push(partial.length) }
+    )
+
+    // One callback per session, the second still reporting the artifacts the
+    // first produced — a caller painting partial results sees them survive a
+    // later failure.
+    expect(snapshots).toEqual([2, 2])
+  })
+
+  it('a session that never settles does not wedge the remaining index', async () => {
+    // Regression: a transcript request that neither resolves nor rejects (a
+    // wedged socket, a backend that accepted the connection and never
+    // answered) used to leave the whole pane on its spinner forever: indexing
+    // is serial, so one pending session kept `artifacts` at null with nothing
+    // to click and no error to read.
+    const sessions = [makeSession({ id: 'stuck' }), makeSession({ id: 'session-2' })]
+
+    const started = Date.now()
+
+    const result = await loadArtifactsForSessions(
+      sessions,
+      async session => {
+        if (session.id === 'stuck') {
+          return await new Promise<SessionMessage[]>(() => {
+            // Never settles, exactly like a hung request.
+          })
+        }
+
+        return [{ content: 'https://example.com/ok.png', role: 'assistant', timestamp: 2000 }]
+      },
+      { timeoutMs: 50 }
+    )
+
+    // The stuck session was abandoned rather than awaited forever...
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(result.failures).toHaveLength(1)
+    expect(result.failures[0]?.session.id).toBe('stuck')
+
+    // ...and the session behind it was still indexed.
+    expect(result.artifacts.map(artifact => artifact.sessionId)).toEqual(['session-2'])
+  })
 })

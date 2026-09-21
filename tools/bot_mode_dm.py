@@ -128,7 +128,16 @@ def message_agent_authorized(agent: Any) -> bool:
 
         # Managed-install check, NOT section non-emptiness: a SOUL.md carrying the
         # legacy protocol text gets an empty section but must still get the tool.
-        return _session_title(agent) == BOT_CHAT_TITLE and is_bot_mode_managed(_agent_home(agent))
+        home = _agent_home(agent)
+        if not is_bot_mode_managed(home):
+            return False
+        if _session_title(agent) == BOT_CHAT_TITLE:
+            return True
+        # LOCAL PATCH (carried as ~/.hermes/patches/0009): lateral agent-to-agent
+        # chat. Any session of a bot-managed profile (kanban workers, relay DM
+        # sessions) may use message_agent, not only the canonical Bot Chat.
+        from tools.bot_mode_probe import _is_bot_managed
+        return _is_bot_managed(Path(home))
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent_authorized failed", exc_info=True)
         return False
