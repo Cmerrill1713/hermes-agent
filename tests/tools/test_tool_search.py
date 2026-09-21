@@ -737,7 +737,7 @@ class TestCatalogListing:
         assert _short_desc("Open an issue. Second sentence dropped.") == "Open an issue."
         long = "word " * 40
         s = _short_desc(long)
-        assert len(s) <= 61  # 60 + ellipsis char
+        assert len(s) <= 111  # 110 + ellipsis char
         assert s.endswith("…")
         assert _short_desc("") == ""
 

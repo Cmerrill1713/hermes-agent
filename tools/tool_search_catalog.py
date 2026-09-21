@@ -213,7 +213,7 @@ def search_catalog(catalog: List[CatalogEntry], query: str, limit: int = 5, *,
 _SENTENCE_END_RE = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\betc)[.!?](?=\s|$)")
 
 
-def _short_desc(description: str, max_chars: int = 60) -> str:
+def _short_desc(description: str, max_chars: int = 110) -> str:
     """First sentence of a tool description, clipped to ``max_chars`` on a word boundary.
     ``e.g.``/``i.e.``/``etc.`` do not end a sentence; whitespace normalization and the regex
     search stay linear-time on hostile input."""

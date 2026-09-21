@@ -66,7 +66,7 @@ Step 1: Do the new thing.
 LONG_DESC_CONTENT = """\
 ---
 name: long-desc
-description: Use when deploying multi-region Kubernetes clusters with custom CNI plugins and service mesh.
+description: Use when deploying multi-region Kubernetes clusters with custom CNI plugins, service mesh, and gitops rollouts.
 ---
 
 # Long Desc Skill
