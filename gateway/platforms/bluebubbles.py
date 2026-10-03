@@ -23,6 +23,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes_async, cache_audio_from_bytes_async, cache_document_from_bytes_async,
 )
 from gateway.platforms.event import MessageEvent, MessageType
+import mimetypes
 from .media_cache import ext_for_mime
 from gateway.platforms.helpers import compile_mention_patterns, strip_markdown
 from utils import TRUTHY_STRINGS
@@ -38,6 +39,11 @@ _BLUEBUBBLES_AUDIO_EXT_OVERRIDES = {
     "audio/x-caf": ".mp3", "audio/mp4": ".m4a",
     "audio/aac": ".m4a",  # historical mapping (shared table says .aac)
 }
+
+def _guess_mime(fname: str) -> str:
+    """Guess MIME type from filename; fixes iMessage 0:00 duration display."""
+    mime, _ = mimetypes.guess_type(fname)
+    return mime or "application/octet-stream"
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +409,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             if is_audio_message:
                 data["isAudioMessage"] = "true"
             res = await self.client.post(self._api_url("/api/v1/message/attachment"), data=data, timeout=120,
-                                         files={"attachment": (fname, payload, "application/octet-stream")})
+                                         files={"attachment": (fname, payload, _guess_mime(fname))})
             res.raise_for_status()
             result = res.json()
             if caption:

@@ -119,7 +119,12 @@ class HookRegistry:
         return handlers
 
     async def emit(self, event_type: str, context: Optional[Dict[str, Any]] = None) -> None:
-        """Fire all handlers for an event, discarding return values."""
+        """Fire all handlers for an event, discarding return values.
+
+        Kept as-is for existing call sites. `agent:end` does NOT use this: the
+        grounding guard must be able to return a blocker, so run_turn.py calls
+        emit_collect() there directly.
+        """
         await self.emit_collect(event_type, context)
 
     async def emit_collect(self, event_type: str, context: Optional[Dict[str, Any]] = None) -> List[Any]:
