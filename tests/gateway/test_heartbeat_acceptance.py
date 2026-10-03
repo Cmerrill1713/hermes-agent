@@ -30,7 +30,7 @@ async def test_cancelled_admission_is_refunded_but_started_execution_is_not():
         await asyncio.Event().wait()
 
     runner._run_agent = model
-    runner.hooks = SimpleNamespace(emit=AsyncMock())
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]))
     runner._hmwa_resolve_session = AsyncMock(return_value=(source, SimpleNamespace(session_id="cancel-test"), key))
     runner._hmwa_prepare_turn = AsyncMock(return_value=(
         runner._PreparedTurn([], "", "check", "check", None, None), {}))

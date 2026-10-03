@@ -79,6 +79,7 @@ def _make_runner(max_concurrent_sessions: int | None = None) -> GatewayRunner:
     runner._is_user_authorized = lambda _source: True
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
+    runner.hooks.emit_collect = AsyncMock(return_value=[])
     runner.session_store = MagicMock()
     runner.delivery_router = MagicMock()
     return runner

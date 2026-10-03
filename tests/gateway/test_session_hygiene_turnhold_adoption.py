@@ -87,7 +87,7 @@ def _build_runner(gateway_run, adapter, fake_db):
     )
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._voice_mode = {}
-    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]), loaded_hooks=False)
     runner.session_store = MagicMock()
     runner.session_store.get_or_create_session.return_value = SessionEntry(
         session_key="agent:main:telegram:dm:12345",

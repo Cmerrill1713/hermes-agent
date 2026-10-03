@@ -93,7 +93,7 @@ def _runner(session_store):
     runner = object.__new__(gateway_run.GatewayRunner)
     runner.adapters = {Platform.TELEGRAM: _Adapter()}
     runner.config = SimpleNamespace(streaming=None, group_sessions_per_user=True, thread_sessions_per_user=False)
-    runner.hooks = SimpleNamespace(loaded_hooks=False, emit=AsyncMock())
+    runner.hooks = SimpleNamespace(loaded_hooks=False, emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]))
     runner.session_store = session_store
     runner._session_db = MagicMock()
     runner._session_db.get_telegram_topic_binding_by_session.return_value = None

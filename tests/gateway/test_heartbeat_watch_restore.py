@@ -158,7 +158,7 @@ async def test_startup_arms_retry_poller_even_without_any_watches(monkeypatch):
     runner._hosted_room_worker_watcher = AsyncMock()
     runner._spawn_supervised = lambda *args: None
     runner._start_loop_heartbeat_task = lambda: None
-    runner.hooks = SimpleNamespace(loaded_hooks=[], emit=AsyncMock())
+    runner.hooks = SimpleNamespace(loaded_hooks=[], emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]))
     runner.adapters = {}
     runner._send_update_notification = AsyncMock(return_value=True)
     runner.session_store = SimpleNamespace(list_sessions=lambda: [])

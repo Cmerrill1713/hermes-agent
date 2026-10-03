@@ -99,6 +99,7 @@ class TestStartupPlatformIsolation:
         runner.hooks = MagicMock()
         runner.hooks.loaded_hooks = []
         runner.hooks.emit = AsyncMock()
+        runner.hooks.emit_collect = AsyncMock(return_value=[])
         runner._suspend_stuck_loop_sessions = MagicMock(return_value=0)
         runner._update_runtime_status = MagicMock()
         runner._update_platform_runtime_status = MagicMock()
@@ -707,6 +708,7 @@ class TestVoiceInputCallbackWiring:
         runner.hooks = MagicMock()
         runner.hooks.loaded_hooks = []
         runner.hooks.emit = AsyncMock()
+        runner.hooks.emit_collect = AsyncMock(return_value=[])
         return runner
 
     @pytest.mark.asyncio

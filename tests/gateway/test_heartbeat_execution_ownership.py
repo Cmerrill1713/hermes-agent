@@ -59,7 +59,7 @@ async def test_admitted_heartbeat_executes_only_in_own_conversation(tmp_path, bo
 
     runner._hmwa_prepare_turn = prepare
     runner._run_agent = model
-    runner.hooks = SimpleNamespace(emit=AsyncMock())
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]))
     adapter.set_message_handler(lambda event: runner._handle_message_with_agent(event, source, key, 1))
     try:
         await runner._heartbeat_poll_once({key: (source, old)})
