@@ -1238,7 +1238,7 @@ def _disabled_platform_names() -> Optional[set]:
         import hermes_yaml as yaml
 
         path = get_hermes_home() / "config.yaml"
-        data = yaml.safe_load(path.read_text()) or {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         platforms = data.get("platforms")
         if not isinstance(platforms, dict):
             return None
