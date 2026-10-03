@@ -533,17 +533,36 @@ export function collectArtifactsForSession(session: SessionInfo, messages: Sessi
   return Array.from(found.values())
 }
 
+const PER_SESSION_LOAD_TIMEOUT_MS = 20_000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    promise.then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      error => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
 export async function loadArtifactsForSessions(
   sessions: SessionInfo[],
   loadPage: (
     session: SessionInfo,
     page: { limit: number; offset: number }
   ) => Promise<Pick<SessionMessagesResponse, 'messages' | 'pagination'>>,
-  options: { maxPageJsonChars?: number } = {}
+  options: { maxPageJsonChars?: number; timeoutMs?: number } = {}
 ): Promise<ArtifactLoadResult> {
   const artifacts: ArtifactRecord[] = []
   const failures: ArtifactLoadFailure[] = []
   const maxPageJsonChars = options.maxPageJsonChars ?? MAX_ARTIFACT_MESSAGE_PAGE_JSON_CHARS
+  const timeoutMs = options.timeoutMs ?? PER_SESSION_LOAD_TIMEOUT_MS
 
   // Keep only one transcript page resident at a time. Recent sessions can each
   // be tens of megabytes, so retaining complete transcripts exhausts the
@@ -554,7 +573,11 @@ export async function loadArtifactsForSessions(
       let offset = 0
 
       while (true) {
-        const page = await loadPage(session, { limit: ARTIFACT_MESSAGE_PAGE_SIZE, offset })
+        const page = await withTimeout(
+          loadPage(session, { limit: ARTIFACT_MESSAGE_PAGE_SIZE, offset }),
+          timeoutMs,
+          `Session ${session.id}`
+        )
         const pageJsonChars = (JSON.stringify(page.messages) ?? '').length
 
         if (pageJsonChars > maxPageJsonChars) {
