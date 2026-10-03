@@ -777,7 +777,11 @@ PLATFORM_HINTS = {
         "stripped, so skip headers, tables, code fences and backticks; for a few items use short lines or a "
         "sentence rather than nested bullets. Put a command or code snippet on its own line as plain text so it "
         "can be copied. Write links as bare URLs (iMessage auto-links them). "
-        f"{_MEDIA_NATIVE}Images (.jpg, .png, .heic) appear as photos and other files arrive as attachments."
+        f"{_MEDIA_NATIVE}Images (.jpg, .png, .heic) appear as photos, audio as voice notes, videos (.mp4, .mov) "
+        "play inline, other files arrive as attachments. Do NOT attempt to send through Messages.app or "
+        "`imsg`: that relay goes out as the human's own account and is sandbox/TCC-blocked for you — a "
+        "MEDIA: line in your reply is the supported send path. Shared/free-tier Photon lines cannot START a "
+        "new conversation: reply only to threads that already messaged this line."
     ),
     "mattermost": (
         "You are in a Mattermost workspace communicating with your user. Mattermost renders standard "
