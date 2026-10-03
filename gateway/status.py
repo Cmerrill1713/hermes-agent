@@ -1223,6 +1223,54 @@ def _coerce_session_store(session_store: Any) -> dict[str, str]:
     return {"status": state if state in {"ok", "unavailable", "retrying"} else "unknown"}
 
 
+def _disabled_platform_names() -> Optional[set]:
+    """Platform names explicitly disabled in config, or None if unknowable.
+
+    Reads ``platforms.<name>.enabled`` straight from config.yaml rather than
+    building a GatewayConfig: this runs on every status write, and an unknown
+    answer must be None (leave state alone) rather than a guess, since dropping
+    an ENABLED platform's record would hide a real outage.
+
+    Env overrides are intentionally not consulted -- an operator who disables a
+    platform in config.yaml is what we are cleaning up after.
+    """
+    try:
+        import hermes_yaml as yaml
+
+        path = get_hermes_home() / "config.yaml"
+        data = yaml.safe_load(path.read_text()) or {}
+        platforms = data.get("platforms")
+        if not isinstance(platforms, dict):
+            return None
+        return {str(name) for name, cfg in platforms.items()
+                if isinstance(cfg, dict) and cfg.get("enabled") is False}
+    except Exception:  # noqa: BLE001 - a status write must never fail on this
+        return None
+
+
+def _drop_disabled_platform_records(payload: dict) -> None:
+    """Remove platform records for platforms disabled in config.
+
+    A disabled platform never reconnects, so the reconnect path that clears
+    ``needs_attention`` (run_adapters) never runs for it. Without this, a flag
+    set before the platform was disabled latches forever and the UI keeps
+    reporting "needs attention" for a platform the operator turned off.
+
+    Skips profile-scoped keys ("profile:platform"): those are owned by another
+    gateway and are pruned by drop_profile_platforms instead.
+    """
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, dict) or not platforms:
+        return
+    disabled = _disabled_platform_names()
+    if not disabled:
+        return
+    payload["platforms"] = {
+        name: rec for name, rec in platforms.items()
+        if not (isinstance(name, str) and ":" not in name and name in disabled)
+    }
+
+
 def _prepare_runtime_status_update(
     *, gateway_state: Any = _UNSET, exit_reason: Any = _UNSET, restart_requested: Any = _UNSET,
     active_agents: Any = _UNSET, active_work: Any = _UNSET, platform: Any = _UNSET, platform_state: Any = _UNSET,
@@ -1289,6 +1337,7 @@ def _prepare_runtime_status_update(
                 updated_at=_utc_now_iso(), writer_pid=current_record["pid"],
                 writer_start_time=current_record["start_time"])
             payload["platforms"][platform] = platform_payload
+        _drop_disabled_platform_records(payload)
         _runtime_status_state = payload
         return path, payload, previous_payload
 
