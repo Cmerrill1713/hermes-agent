@@ -91,6 +91,7 @@ _DEFAULT_MEDIA_SEND_TIMEOUT = 300
 ADVISORY_EXIT_CODE = 2
 ADVISORY_EXIT_CODES_BY_SCRIPT: dict[str, tuple[int, ...]] = {
     "memory-preflight.sh": (2,),
+    "session-retention.sh": (2,),
 }
 
 
