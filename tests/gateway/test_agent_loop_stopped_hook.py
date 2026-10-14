@@ -38,7 +38,7 @@ def _make_runner():
     # await on a non-awaitable.
     adapter = SimpleNamespace(send=AsyncMock())
     runner.adapters = {Platform.TELEGRAM: adapter}
-    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]), loaded_hooks=False)
     runner._running_agents = {}
     runner._pending_messages = {}
 

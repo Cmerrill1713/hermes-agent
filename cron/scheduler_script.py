@@ -84,6 +84,16 @@ def _get_script_timeout() -> int:
 
 _DEFAULT_MEDIA_SEND_TIMEOUT = 300
 
+# Exit code a script may use to say "ran fine, but here are advisories" without
+# being recorded as a cron failure. memory-preflight.sh documents its own contract
+# as "0 = OK, 2 = ADVISORY, 1 = FAIL". A script opting into that contract should
+# declare it here; scripts with no declared contract keep strict != 0 semantics.
+ADVISORY_EXIT_CODE = 2
+ADVISORY_EXIT_CODES_BY_SCRIPT: dict[str, tuple[int, ...]] = {
+    "memory-preflight.sh": (2,),
+    "session-retention.sh": (2,),
+}
+
 
 def _get_media_send_timeout() -> int:
     """Per-attachment media-send timeout: HERMES_CRON_MEDIA_SEND_TIMEOUT env, then
@@ -524,13 +534,23 @@ def _run_job_script(
             logger.warning("Failed to redact sensitive text from output: %s", e)
             stdout = stderr = "[REDACTED - redaction failed]"
 
-        if proc.returncode != 0:
+        # Exit code a script may use to say "ran fine, but here are advisories" without
+        # being recorded as a cron failure. Scoped per-script on purpose: a GLOBAL 2
+        # would silently convert genuine exit-2 failures in every other job into
+        # false health. memory-preflight.sh documents its contract as
+        # "0 = OK, 2 = ADVISORY, 1 = FAIL" and opts in here.
+        advisory_codes = ADVISORY_EXIT_CODES_BY_SCRIPT.get(
+            os.path.basename(script_path or ""), ())
+        if proc.returncode != 0 and proc.returncode not in advisory_codes:
             parts = [f"Script exited with code {proc.returncode}"]
             if stderr:
                 parts.append(f"stderr:\n{stderr}")
             if stdout:
                 parts.append(f"stdout:\n{stdout}")
             return False, "\n".join(parts)
+        if proc.returncode == ADVISORY_EXIT_CODE:
+            logger.info("Script exited %d (advisory, not a failure)",
+                        proc.returncode)
         return True, stdout
     except Exception as exc:
         return False, f"Script execution failed: {exc}"

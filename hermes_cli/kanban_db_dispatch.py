@@ -414,6 +414,47 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
         return True
 
 
+def _worker_orphaned(pid: Optional[int], claim_lock: Optional[str]) -> bool:
+    """True when ``pid`` is LIVE but no longer a child of the dispatcher that claimed it.
+
+    ``_worker_alive`` answers liveness and PID-fingerprint identity; it never asks
+    whether the worker's parent is still the dispatcher named in ``claim_lock``
+    (``<host>:<dispatcher_pid>``). A worker orphaned by a gateway crash is reparented
+    to launchd and keeps heartbeating every 60s, so every reaper's precondition fails
+    at once: alive => skipped by the crash sweep; healthy claim_lock/claim_expires =>
+    skipped by ``reconcile_orphaned_running`` (whose own docstring names this: "a zombie
+    forever"); NULL ``max_runtime_seconds`` => skipped by ``enforce_max_runtime``. The
+    worker slot is then held indefinitely by a process doing nothing, and with
+    ``max_concurrent_workers: 1`` nothing else can start.
+
+    Only *parent*age is asserted, never process identity, so this cannot be confused
+    with the recycled-PID case ``_pid_recycled`` already handles. A live worker that is
+    still a direct child of the claiming dispatcher is NOT orphaned — that is every
+    legitimate worker. Fails OPEN (False) whenever lineage cannot be read, so an
+    unreadable ``ps`` can never reap a healthy worker.
+    """
+    if not pid or not claim_lock or ":" not in claim_lock:
+        return False
+    try:
+        dispatcher_pid = int(claim_lock.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return False
+    if dispatcher_pid <= 1:
+        # A lock naming launchd carries no lineage to check against.
+        return False
+    try:
+        import psutil
+        parent = psutil.Process(int(pid)).ppid()
+    except Exception:
+        # psutil absent, or the pid vanished between the liveness check and here
+        # (psutil.NoSuchProcess). Not orphaned — _worker_alive's dead-pid sweep owns it.
+        return False
+    if parent == dispatcher_pid:
+        return False
+    # Reparented to launchd (PID 1) by a crashed/exited dispatcher.
+    return parent == 1
+
+
 def _kill_fn(signal_fn) -> Optional[Callable[[int, int], None]]:
     """``signal_fn`` test hook, else ``os.kill`` when the platform has one."""
     if signal_fn is not None:
@@ -1135,6 +1176,10 @@ class _CrashSweep:
 
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
+    # Live workers whose dispatcher died (reparented to launchd): released and
+    # terminated, but NOT counted as task failures — a gateway crash is
+    # infrastructure loss, not the card misbehaving.
+    orphaned: list[str] = field(default_factory=list)
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
@@ -1148,7 +1193,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, "
+            "last_heartbeat_at "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -1163,10 +1209,42 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             if started_at is not None and time.time() - started_at < _kb._resolve_crash_grace_seconds():
                 continue
             if _worker_alive(row["worker_pid"], _kb._row_get(row, "worker_started_at")):
-                continue
+                # Alive by liveness+fingerprint. Still reclaim it when its parent is
+                # no longer the dispatcher in claim_lock: a gateway crash reparents the
+                # worker to launchd and it keeps heartbeating, which used to pin the
+                # single worker slot forever (see _worker_orphaned).
+                if not _worker_orphaned(row["worker_pid"], row["claim_lock"]):
+                    continue
+                # An orphan that is STILL heartbeating is doing live work whose only
+                # supervisor died (e.g. the gateway was restarted out from under it).
+                # Reaping it would kill healthy in-flight work, so require it to have
+                # gone quiet first. Workers heartbeat ~60s; 2x that is a safe margin.
+                hb = _kb._row_get(row, "last_heartbeat_at")
+                if hb is not None and (time.time() - int(hb)) <= TERMINAL_WORKER_REAP_GRACE_SECONDS:
+                    continue
+                orphan_reclaimed = True
+            else:
+                orphan_reclaimed = False
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
+            if orphan_reclaimed:
+                # Its own process is healthy and its work may still be in flight, so
+                # this is infrastructure loss, NOT a task failure: reuse the safe
+                # ``crashed`` run outcome but skip breaker accounting (crash_details)
+                # so a repeated gateway crash cannot fail-limit a healthy card.
+                dead = _DeadWorker(
+                    "orphaned", None,
+                    f"worker pid {pid} is alive but no longer a child of dispatcher "
+                    f"{row['claim_lock']} (reparented to launchd) — claim reclaimed as "
+                    f"orphaned; the worker's in-flight progress was lost",
+                    "orphaned_worker",
+                    {
+                        "pid": pid, "claimer": row["claim_lock"],
+                        "exit_kind": "orphaned", "orphan_reclaimed": True,
+                    },
+                )
+            else:
+                dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1207,6 +1285,14 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
+            elif orphan_reclaimed:
+                # An orphaned worker is ALIVE and unsupervised: it would keep writing
+                # heartbeats and tool results against a claim it no longer owns, racing
+                # the re-dispatch for the same card. Terminate it before releasing.
+                _terminate_reclaimed_worker(
+                    pid, row["claim_lock"], started_at=_kb._row_get(row, "worker_started_at"),
+                )
+                sweep.orphaned.append(row["id"])
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))

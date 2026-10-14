@@ -39,7 +39,7 @@ async def test_gateway_titles_original_request_without_changing_model_input(tmp_
     runner.config = GatewayConfig()
     runner.adapters = {}
     runner._get_proxy_url = lambda: None
-    runner.hooks = SimpleNamespace(emit=AsyncMock())
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]))
     runner._hmwa_resolve_session = AsyncMock(return_value=(source, entry, entry.session_key))
     runner._hmwa_open_session = AsyncMock(return_value=(False, True))
     runner._set_session_env = lambda context: {}

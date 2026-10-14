@@ -71,6 +71,7 @@ def _make_runner():
     runner.session_store = None
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
+    runner.hooks.emit_collect = AsyncMock(return_value=[])
     runner.pairing_store = MagicMock()
     runner.pairing_store.is_approved.return_value = True
     runner._is_user_authorized = lambda _source: True

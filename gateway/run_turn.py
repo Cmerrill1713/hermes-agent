@@ -1655,12 +1655,36 @@ class GatewayTurnMixin:
             logger.debug("runtime_footer build failed: %s", _footer_err)
             return ""
 
-    async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
-        """agent:end hook, process-watcher scheduling, and watch-notification drain."""
-        await self.hooks.emit("agent:end", {
-            **hook_ctx, "response": (response or "")[:500], "model": agent_result.get("model", ""),
+    async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response) -> list:
+        """agent:end hook, process-watcher scheduling, and watch-notification drain.
+
+        Returns the list of non-None values returned by agent:end handlers. The
+        grounding guard returns a blocker string there; the caller appends it to the
+        delivered response so the correction is visible to the user.
+
+        Two deliberate changes from the original:
+
+        1. emit_collect() instead of emit(). emit() DISCARDS return values, so a
+           hook could never feed anything back; the grounding guard's blocker was
+           computed correctly and then thrown away. Blockers returned by any
+           agent:end hook are now collected.
+        2. The response is passed in full, not truncated to 500 chars. A 500-char
+           window cuts off the "## Not Verified" section on any report longer than
+           that, which is exactly the compliance signal the guard reads -- so the
+           guard could not see it and stayed silent. Hooks that only need a preview
+           should slice it themselves.
+        """
+        blockers = await self.hooks.emit_collect("agent:end", {
+            **hook_ctx, "response": response or "", "model": agent_result.get("model", ""),
             "provider": agent_result.get("provider", ""),
         })
+        for b in blockers or []:
+            if not b:
+                continue
+            text = b if isinstance(b, str) else str(b)
+            if "unverified-claim-guard" in text or "GROUNDING FAILURE" in text:
+                logger.warning("[grounding-guard] turn blocked: %s", text[:200])
+            hook_ctx.setdefault("_hook_blockers", []).append(text)
 
         # Pending process watchers (check_interval on background processes)
         try:
@@ -1682,6 +1706,8 @@ class GatewayTurnMixin:
             await self._drain_watch_notifications(_pr.completion_queue)
         except Exception as e:
             logger.debug("Watch queue drain error: %s", e)
+
+        return list(blockers or [])
 
     # One owner for the boundary copy (agent/turn_failure_copy.py): the core closer in
     # agent/conversation_loop.py writes the same row on the paths that never reach this layer.
@@ -2243,7 +2269,14 @@ class GatewayTurnMixin:
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
-            await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
+            blockers = await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
+            if blockers:
+                # A hook asked for a correction. Append it to the delivered text so the
+                # user actually sees it -- previously the value was collected and then
+                # dropped, so detection had no visible effect anywhere.
+                _notice = "\n\n".join(b for b in blockers if b)
+                if _notice and response and not agent_result.get("already_sent"):
+                    response = f"{response}\n\n{_notice}"
 
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (
                 self._hmwa_classify_turn_failure(agent_result, history, session_entry)

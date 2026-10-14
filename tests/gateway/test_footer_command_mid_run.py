@@ -63,7 +63,7 @@ def _make_runner(session_entry: SessionEntry):
     adapter._pending_messages = {}
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._voice_mode = {}
-    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]), loaded_hooks=False)
     runner.session_store = MagicMock()
     runner.session_store.get_or_create_session.return_value = session_entry
     runner.session_store.load_transcript.return_value = []

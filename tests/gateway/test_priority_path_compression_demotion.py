@@ -69,7 +69,7 @@ def _make_runner(*, compression_in_flight: bool):
     adapter._pending_messages = {}
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._voice_mode = {}
-    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]), loaded_hooks=False)
 
     source = _make_source()
     sk = build_session_key(source)

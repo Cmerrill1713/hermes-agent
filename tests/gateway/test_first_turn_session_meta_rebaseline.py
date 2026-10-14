@@ -83,6 +83,7 @@ def _bootstrap(monkeypatch, tmp_path, db):
     runner._should_send_voice_reply = lambda *_a, **_kw: False
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
+    runner.hooks.emit_collect = AsyncMock(return_value=[])
 
     # Live agent cache (not a MagicMock) so the re-baseline actually rewrites
     # the snapshot tuple in place.

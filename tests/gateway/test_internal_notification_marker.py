@@ -58,6 +58,7 @@ def _bootstrap(monkeypatch, tmp_path):
     runner._should_send_voice_reply = lambda *_a, **_kw: False
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
+    runner.hooks.emit_collect = AsyncMock(return_value=[])
 
     runner.session_store = MagicMock()
     runner.session_store.get_or_create_session.return_value = SessionEntry(

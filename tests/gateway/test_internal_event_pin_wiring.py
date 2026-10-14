@@ -79,6 +79,7 @@ def _make_runner(
     r._should_send_voice_reply = lambda *a, **k: False
     r.hooks = MagicMock()
     r.hooks.emit = AsyncMock()
+    r.hooks.emit_collect = AsyncMock(return_value=[])
     # The turn lease is released by the real turn tail, which _run_agent's
     # stub skips; disable leasing so three sequential turns can run.
     r._turn_leases = None

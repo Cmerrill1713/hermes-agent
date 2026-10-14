@@ -54,6 +54,7 @@ def _runner(monkeypatch, tmp_path):
     runner._should_send_voice_reply = lambda *_a, **_kw: False
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
+    runner.hooks.emit_collect = AsyncMock(return_value=[])
 
     runner.session_store = MagicMock()
     runner.session_store.get_or_create_session.return_value = SessionEntry(
@@ -351,9 +352,11 @@ async def test_agent_end_hook_includes_model_and_provider(monkeypatch, tmp_path)
         _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
     )
 
+    # _hmwa_post_turn_hooks calls hooks.emit_collect("agent:end", ...) so the
+    # grounding guard's blocker survives to the caller; emit() would discard it.
     end_context = next(
         call.args[1]
-        for call in runner.hooks.emit.await_args_list
+        for call in runner.hooks.emit_collect.await_args_list
         if call.args[0] == "agent:end"
     )
     assert end_context["model"] == "gpt-5.6-terra"

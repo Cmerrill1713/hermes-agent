@@ -38,6 +38,7 @@ def _make_runner():
     runner._running_agents = {}
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
+    runner.hooks.emit_collect = AsyncMock(return_value=[])
     runner.hooks.loaded_hooks = []
     runner._session_db = None
     runner._get_or_create_gateway_honcho = lambda session_key: (None, None)

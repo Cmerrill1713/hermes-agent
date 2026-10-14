@@ -46,7 +46,7 @@ def _runner_with_running_agent(adapter, *, compression_in_flight):
         platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")})
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._voice_mode = {}
-    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]), loaded_hooks=False)
     sk = build_session_key(_source())
     entry = SessionEntry(session_key=sk, session_id="sess-1", created_at=datetime.now(),
                          updated_at=datetime.now(), platform=Platform.TELEGRAM, chat_type="dm")

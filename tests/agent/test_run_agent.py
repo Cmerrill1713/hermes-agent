@@ -5070,6 +5070,78 @@ class TestRunConversation:
         # => ~4 create calls), NOT an unbounded retry loop.
         assert agent.client.chat.completions.create.call_count <= 6
 
+    def test_output_cap_retry_compression_grows_request_terminates_bounded(self, agent):
+        """Regression: a compressor that INFLATES the request (rather than
+        shrinking it) must not turn the output-cap recovery into a runaway
+        retry loop.
+
+        The output-cap handler (``_clamp_output_cap`` in ``agent/turn_overflow.py``)
+        counts every recovery pass against the shared ``compression_attempts``
+        budget and retries with a clamped ``max_tokens``; the only thing that
+        stops the loop once the transcript stops shrinking is that budget, so a
+        pass that *grows* the request (the 3x scaffolding-inflation shape that
+        motivated the refusal fix) must still terminate in a bounded number of
+        provider calls via the ``compression_exhausted`` contract — the gateway
+        uses that flag to route the bloated transcript to a fresh session instead
+        of replaying the inflation loop.
+
+        The companion ``_no_progress`` test above returns the SAME list object,
+        which the compressor refuses outright; this one returns a *different*,
+        LARGER list, so the compaction commits (candidate accepted) and the
+        request grows each pass — the case the no-progress shortcut never sees.
+        """
+        self._setup_agent(agent)
+        agent.api_mode = "chat_completions"
+        agent.provider = "openrouter"
+        agent.model = "some/model"
+        agent.max_tokens = 65_536
+        agent.compression_enabled = True
+        agent.context_compressor.context_length = 200_000
+        agent.context_compressor.should_compress = MagicMock(return_value=True)
+
+        error_msg = (
+            "max_tokens: 65536 > context_window: 200000 "
+            "- input_tokens: 199000 = available_tokens: 1000"
+        )
+
+        def _rejecting(*args, **kwargs):
+            exc = Exception(error_msg)
+            exc.status_code = 400
+            exc.code = 400
+            raise exc
+
+        # The provider never recovers: every call raises the output-cap 400, so the
+        # ONLY way out is the compression_attempts budget, never a provider response.
+        agent.client.chat.completions.create.side_effect = _rejecting
+
+        # A "compressed" history that is actually LARGER than the input: each pass
+        # replaces N messages with N*3 (the scaffolding-inflation shape). This is a
+        # fresh, mutated list — NOT the same object — so ``_candidate_rejected``
+        # accepts it and the bloated transcript is what gets re-sent.
+        def _inflating(messages, system_message, **kwargs):
+            grown = []
+            for i, m in enumerate(messages):
+                grown.append(dict(m))
+                grown.append({"role": "assistant", "content": f"inflated-scaffold-{i}-a"})
+                grown.append({"role": "assistant", "content": f"inflated-scaffold-{i}-b"})
+            return grown, system_message
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent.context_compressor, "update_model"),
+            patch.object(agent, "_compress_context", side_effect=_inflating),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is False
+        assert result.get("compression_exhausted") is True
+        # Bounded by the budget (default max attempts=3 => a handful of create
+        # calls), NOT an unbounded inflation loop. Same ceiling as the companion
+        # no-progress test.
+        assert agent.client.chat.completions.create.call_count <= 6
+
 
 class TestHookPayloadSanitizesSimpleNamespace:
     """Regression: ``_hook_jsonable`` referenced ``SimpleNamespace`` without

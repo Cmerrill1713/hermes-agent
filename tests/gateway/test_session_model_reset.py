@@ -35,7 +35,7 @@ def _make_runner():
     adapter.send = AsyncMock()
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._voice_mode = {}
-    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]), loaded_hooks=False)
     runner._session_model_overrides = {}
     runner._session_reasoning_overrides = {}
     runner._pending_model_notes = {}

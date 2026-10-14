@@ -54,6 +54,14 @@ Every new or modernised skill — bundled, optional, or contributed — meets al
    live network. Run `scripts/run_tests.sh tests/skills/test_<skill>_skill.py -q`.
 8. **`.env.example` additions sit in a clearly delimited block.** Contributor copies of the file are
    usually stale; edits outside the skill's own block are dropped during salvage.
+9. **`verify:` frontmatter — one runnable smoke command.** Every agent-created skill carries a
+   `verify:` frontmatter key with a single line that is a fast, self-contained smoke test for the
+   skill (a Python `-c` snippet, a `--help` invocation, or `python script.py --dry-run`). The
+   curator runs this command on every review pass; a non-zero exit or crash triggers the same
+   archive-as-stale flow that staleness triggers. Pinned skills are exempt. Core and bundled
+   skills are out of scope — the curator only touches agent-created skills. The smoke command
+   must not hit the network or require user action; it must be safe to run headless.
+   Example frontmatter: `verify: python scripts/sample.py --help`.
 
 No `offset`/`limit` pagination on skill-loading tools — the agent must read a skill fully (root).
 The salvage/modernisation checklist for external skill PRs is `references/new-skill-pr-salvage.md`
@@ -69,6 +77,8 @@ prune|backup|rollback`; telemetry `tools/skill_usage.py` owns `~/.hermes/skills/
 (`use_count`, `view_count`, `patch_count`, `last_activity_at`, `state` active/stale/archived,
 `pinned`). Config `curator:` — `enabled, interval_hours, min_idle_hours, stale_after_days,
 archive_after_days, backup.*`; its LLM calls route through `auxiliary` (`agent/AGENTS.md`).
+Verify-then-keep config: `curator.verify` (bool, default false), `curator.verify_timeout_seconds`
+(20), `curator.verify_failures_to_archive` (3, clamped ≥ 1).
 
 Invariants: touches only `created_by: "agent"` skills (bundled + hub-installed are off-limits;
 `prune_builtins` lets the deterministic inactivity walk archive bundled skills but never adds them
@@ -77,3 +87,6 @@ refuses — the fork must only be offered skills it can read and write);
 never deletes — archive is the maximum; pinned skills are exempt from every auto-transition and
 the LLM review; `skill_manage(action="delete")` refuses pinned skills while patch/edit/write_file/
 remove_file still work so the agent can keep improving them.
+A verification pass runs every agent-created skill's `verify:` smoke command before any archive or
+consolidation; skills whose smoke command fails (non-zero exit, crash, timeout) are archived with a
+notation in the report. Pinned skills are exempt.
